@@ -111,7 +111,6 @@ STYLE_NAMES = list(styles.keys())
 DEFAULT_STYLE_NAME = "(No style)"
 SCHEDULE_NAME = ["Flow_DPM_Solver"]
 DEFAULT_SCHEDULE_NAME = "Flow_DPM_Solver"
-NUM_IMAGES_PER_PROMPT = 1
 INFER_SPEED = 0
 
 
@@ -232,6 +231,14 @@ def randomize_seed_fn(seed: int, randomize_seed: bool) -> int:
     return seed
 
 
+def deselect():
+    return gr.Gallery(selected_index=None)
+
+
+def select_first():
+    return gr.Gallery(selected_index=0)
+
+
 @torch.no_grad()
 @torch.inference_mode()
 @spaces.GPU(enable_queue=True)
@@ -286,31 +293,25 @@ def generate(
     pipe.progress_fn(1.0, desc="Sana End")
     INFER_SPEED = (time.time() - time_start) / num_imgs
 
-    save_img = False
-    if save_img:
-        img = [save_image_sana(img, seed, save_img=save_image) for img in images]
-        print(img)
-    else:
-        img = [
-            Image.fromarray(
-                norm_ip(img, -1, 1)
-                .mul(255)
-                .add_(0.5)
-                .clamp_(0, 255)
-                .permute(1, 2, 0)
-                .to("cpu", torch.uint8)
-                .numpy()
-                .astype(np.uint8)
-            )
-            for img in images
-        ]
+    img = [
+        Image.fromarray(
+            norm_ip(img, -1, 1)
+            .mul(255)
+            .add_(0.5)
+            .clamp_(0, 255)
+            .permute(1, 2, 0)
+            .to("cpu", torch.uint8)
+            .numpy()
+            .astype(np.uint8)
+        )
+        for img in images
+    ]
 
     torch.cuda.empty_cache()
 
     return (
         img,
         seed,
-        f"<span style='font-size: 16px; font-weight: bold;'>Inference Speed: {INFER_SPEED:.3f} s/Img</span>",
         box,
     )
 
@@ -325,7 +326,7 @@ DESCRIPTION = f"""
         <p><span style="font-size: 36px; font-weight: bold;">Sana-{model_size}B</span><span style="font-size: 20px; font-weight: bold;">{args.image_size}px</span></p>
         <p style="font-size: 16px; font-weight: bold;">Sana: Efficient High-Resolution Image Synthesis with Linear Diffusion Transformer</p>
         <p><span style="font-size: 16px;"><a href="https://arxiv.org/abs/2410.10629">[Paper]</a></span> <span style="font-size: 16px;"><a href="https://github.com/NVlabs/Sana">[Github(coming soon)]</a></span> <span style="font-size: 16px;"><a href="https://nvlabs.github.io/Sana">[Project]</a></span</p>
-        <p style="font-size: 16px; font-weight: bold;">Powered by <a href="https://hanlab.mit.edu/projects/dc-ae">DC-AE</a> with 32x latent space, </p>running on node {socket.gethostname()}.
+        <p style="font-size: 16px; font-weight: bold;">Powered by <a href="https://hanlab.mit.edu/projects/dc-ae">DC-AE</a> with 32x latent space.</p>
         <p style="font-size: 16px; font-weight: bold;">Unsafe word will give you a 'Red Heart' in the image instead.</p>
         """
 if model_size == "0.6":
@@ -360,24 +361,20 @@ with gr.Blocks(css=css, title="Sana") as demo:
         visible=os.getenv("SHOW_DUPLICATE_BUTTON") == "1",
     )
     info_box = gr.Markdown(
-        value=f"<span style='font-size: 16px; font-weight: bold;'>Total inference runs: </span><span style='font-size: 16px; color:red; font-weight: bold;'>{read_inference_count()}</span>"
+        value=update_inference_count,
+        every=10
     )
-    demo.load(fn=update_inference_count, outputs=info_box)  # update the value when re-loading the page
+    # demo.load(fn=update_inference_count, outputs=info_box, api_name=False)  # update the value when re-loading the page
     # with gr.Row(equal_height=False):
     with gr.Group():
-        with gr.Row():
-            prompt = gr.Text(
-                label="Prompt",
-                show_label=False,
-                max_lines=1,
-                placeholder="Enter your prompt",
-                container=False,
-            )
-            run_button = gr.Button("Run", scale=0)
-        result = gr.Gallery(label="Result", show_label=False, columns=NUM_IMAGES_PER_PROMPT, format="png")
-    speed_box = gr.Markdown(
-        value=f"<span style='font-size: 16px; font-weight: bold;'>Inference speed: {INFER_SPEED} s/Img</span>"
-    )
+        prompt = gr.Textbox(
+            label="Prompt",
+            show_label=False,
+            placeholder="Enter your prompt",
+            container=False,
+            submit_btn="Run",
+        )
+        result = gr.Gallery(label="Result", show_label=False, format="jpeg")
     with gr.Accordion("Advanced options", open=False):
         with gr.Group():
             with gr.Row(visible=True):
@@ -464,8 +461,11 @@ with gr.Blocks(css=css, title="Sana") as demo:
         inputs=prompt,
         outputs=[result, seed],
         fn=generate,
-        cache_examples=CACHE_EXAMPLES,
-    )
+        cache_examples=False,
+        cache_mode='lazy',
+        run_on_click=True,
+        examples_per_page=len(examples),
+    ).load_input_event.then(fn=select_first, inputs=None, outputs=result, show_progress='hidden')
 
     use_negative_prompt.change(
         fn=lambda x: gr.update(visible=x),
@@ -478,8 +478,14 @@ with gr.Blocks(css=css, title="Sana") as demo:
         triggers=[
             prompt.submit,
             negative_prompt.submit,
-            run_button.click,
         ],
+        fn=deselect,
+        inputs=None,
+        outputs=result,
+        show_progress='hidden',
+        api_name=False,
+        queue=False,
+    ).then(
         fn=generate,
         inputs=[
             prompt,
@@ -495,8 +501,18 @@ with gr.Blocks(css=css, title="Sana") as demo:
             flow_dpms_inference_steps,
             randomize_seed,
         ],
-        outputs=[result, seed, speed_box, info_box],
+        outputs=[result, seed, info_box],
         api_name="run",
+    ).then(
+        fn=select_first,
+        inputs=None,
+        outputs=result,
+        show_progress='full',
+        api_name=False,
+        queue=False,
+    )
+    gr.HTML(
+        value="<p style='text-align: center; font-size: 14px;'>Useful link: <a href='https://accessibility.mit.edu'>MIT Accessibility</a></p>"
     )
 
 if __name__ == "__main__":
