@@ -26,5 +26,7 @@ pip install -U xformers==0.0.27.post2 --index-url https://download.pytorch.org/w
 # install sana
 pip install -e .
 
+# pip install tools/nunchaku-0.0.2b0-cp312-cp312-linux_x86_64.whl
+
 # install torchprofile
 # pip install git+https://github.com/zhijian-liu/torchprofile

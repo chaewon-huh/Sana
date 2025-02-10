@@ -130,7 +130,6 @@ def open_db():
 def read_inference_count():
     with open_db() as db:
         cur = db.execute('SELECT value FROM counter WHERE app="Sana"')
-        db.commit()
     return cur.fetchone()[0]
 
 
@@ -255,6 +254,7 @@ def generate(
     flow_dpms_inference_steps: int = 20,
     randomize_seed: bool = False,
 ):
+    write_inference_count(num_imgs)
     global INFER_SPEED
     # seed = 823753551
     seed = int(randomize_seed_fn(seed, randomize_seed))
@@ -324,6 +324,7 @@ DESCRIPTION = f"""
         <p><span style="font-size: 36px; font-weight: bold;">Sana-{model_size}B</span><span style="font-size: 20px; font-weight: bold;">{args.image_size}px</span></p>
         <p style="font-size: 16px; font-weight: bold;">Sana: Efficient High-Resolution Image Synthesis with Linear Diffusion Transformer</p>
         <p><span style="font-size: 16px;"><a href="https://arxiv.org/abs/2410.10629">[Paper]</a></span> <span style="font-size: 16px;"><a href="https://github.com/NVlabs/Sana">[Github]</a></span> <span style="font-size: 16px;"><a href="https://nvlabs.github.io/Sana">[Project]</a></span</p>
+        <p style="font-size: 16px; font-weight: bold;"><a href="/4bit">4Bit version</a> powered by <a href="https://github.com/mit-han-lab/deepcompressor">deepcompressor</a> and <a href="https://github.com/mit-han-lab/nunchaku">nunchaku</a><p>
         <p style="font-size: 16px; font-weight: bold;">Powered by <a href="https://hanlab.mit.edu/projects/dc-ae">DC-AE</a> with 32x latent space.</p>
         <p style="font-size: 16px; font-weight: bold;">Prompts support English, Chinese and emojis.</p>
         <p style="font-size: 16px; font-weight: bold;">{NODE}</p>
@@ -356,7 +357,7 @@ css = """
 .gradio-container{max-width: 640px !important}
 h1{text-align:center}
 """
-with gr.Blocks(css=css, title="Sana") as demo:
+with gr.Blocks(css=css, title="Sana", delete_cache=(86400, 86400)) as demo:
     gr.Markdown(title)
     gr.HTML(DESCRIPTION)
     gr.DuplicateButton(

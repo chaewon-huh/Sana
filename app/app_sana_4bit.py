@@ -31,6 +31,7 @@ import gradio as gr
 import numpy as np
 import spaces
 import torch
+import sqlite3
 from diffusers import SanaPipeline
 from nunchaku.models.transformer_sana import NunchakuSanaTransformer2DModel
 from torchvision.utils import save_image
@@ -114,6 +115,19 @@ DEFAULT_SCHEDULE_NAME = "Flow_DPM_Solver"
 NUM_IMAGES_PER_PROMPT = 1
 
 
+def open_db():
+    db = sqlite3.connect(COUNTER_DB)
+    db.execute("CREATE TABLE IF NOT EXISTS counter(app CHARS PRIMARY KEY UNIQUE, value INTEGER)")
+    db.execute('INSERT OR IGNORE INTO counter(app, value) VALUES("Sana", 0)')
+    return db
+
+
+def write_inference_count(count):
+    count = max(0, int(count))
+    with open_db() as db:
+        db.execute(f'UPDATE counter SET value=value+{count} WHERE app="Sana"')
+        db.commit()
+
 def apply_style(style_name: str, positive: str, negative: str = "") -> tuple[str, str]:
     p, n = styles.get(style_name, styles[DEFAULT_STYLE_NAME])
     if not negative:
@@ -186,6 +200,7 @@ def generate(
     randomize_seed: bool = False,
 ):
     global INFER_SPEED
+    write_inference_count(num_imgs)
     # seed = 823753551
     seed = int(randomize_seed_fn(seed, randomize_seed))
     generator = torch.Generator(device=device).manual_seed(seed)
@@ -262,7 +277,7 @@ css = """
 h1 {text-align: center;}
 """
 theme = gr.themes.Base()
-with gr.Blocks(css=css, theme=theme, title="Sana") as demo:
+with gr.Blocks(css=css, theme=theme, title="Sana", delete_cache=(86400, 86400)) as demo:
     gr.Markdown(title)
     gr.HTML(DESCRIPTION)
     gr.DuplicateButton(
@@ -361,7 +376,7 @@ with gr.Blocks(css=css, theme=theme, title="Sana") as demo:
                 num_imgs = gr.Slider(
                     label="Num Images",
                     minimum=1,
-                    maximum=6,
+                    maximum=2,
                     step=1,
                     value=1,
                 )
@@ -406,4 +421,4 @@ with gr.Blocks(css=css, theme=theme, title="Sana") as demo:
     )
 
 if __name__ == "__main__":
-    demo.queue(max_size=20).launch(server_name="0.0.0.0", server_port=DEMO_PORT, debug=False, share=args.share)
+    demo.queue(max_size=20).launch(server_name="0.0.0.0", server_port=DEMO_PORT, debug=False, root_path='/4bit', share=args.share)
