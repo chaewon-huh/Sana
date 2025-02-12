@@ -87,6 +87,8 @@ if torch.cuda.is_available():
 
 def save_image(img):
     if isinstance(img, dict):
+        return img['composite']
+    if isinstance(img, dict):
         img = img["composite"]
     temp_file = tempfile.NamedTemporaryFile(suffix=".png", delete=False)
     img.save(temp_file.name)
@@ -112,8 +114,9 @@ def run(
     blend_alpha: float,
 ) -> tuple[Image, str]:
 
-    print(f"Prompt: {prompt}")
-    image_numpy = np.array(image["composite"].convert("RGB"))
+    print(f"Prompt: {prompt}, cond: {image['composite']}")
+    image["composite"] = Image.open(image["composite"]).convert('RGB')
+    image_numpy = np.array(image["composite"])
 
     if prompt.strip() == "" and (np.sum(image_numpy == 255) >= 3145628 or np.sum(image_numpy == 0) >= 3145628):
         return blank_image, "Please input the prompt or draw something."
@@ -187,12 +190,12 @@ with gr.Blocks(css_paths="asset/app_styles/controlnet_app_style.css", title=f"Sa
         with gr.Column(elem_id="column_input"):
             gr.Markdown("## INPUT", elem_id="input_header")
             with gr.Group():
-                canvas = gr.Sketchpad(
+                canvas = gr.ImageEditor(
                     value=blank_image,
                     height=640,
                     image_mode="RGB",
                     sources=["upload", "clipboard"],
-                    type="pil",
+                    type="filepath",
                     label="Sketch",
                     show_label=False,
                     show_download_button=True,
@@ -201,7 +204,7 @@ with gr.Blocks(css_paths="asset/app_styles/controlnet_app_style.css", title=f"Sa
                     canvas_size=(1024, 1024),
                     scale=1,
                     brush=gr.Brush(default_size=3, colors=["#000000"], color_mode="fixed"),
-                    format="png",
+                    format="webp",
                     layers=False,
                 )
                 with gr.Row():
@@ -273,7 +276,6 @@ with gr.Blocks(css_paths="asset/app_styles/controlnet_app_style.css", title=f"Sa
 
     run_inputs = [canvas, prompt, prompt_template, sketch_thickness, guidance_scale, inference_steps, seed, blend_alpha]
     run_outputs = [result, latency_result]
-
     randomize_seed.click(
         lambda: random.randint(0, MAX_SEED),
         inputs=[],
@@ -303,4 +305,4 @@ with gr.Blocks(css_paths="asset/app_styles/controlnet_app_style.css", title=f"Sa
 
 
 if __name__ == "__main__":
-    demo.queue(max_size=20).launch(server_name="0.0.0.0", server_port=DEMO_PORT, debug=False, share=args.share)
+    demo.queue(max_size=20).launch(server_name="0.0.0.0", server_port=DEMO_PORT, debug=False, share=args.share, root_path='/ctrlnet')

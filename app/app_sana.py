@@ -323,7 +323,7 @@ NODE='Total GPUs: 8; Current GPU ID: '+ str(int(socket.gethostname()[-1]) + 1) +
 DESCRIPTION = f"""
         <p><span style="font-size: 36px; font-weight: bold;">Sana-{model_size}B</span><span style="font-size: 20px; font-weight: bold;">{args.image_size}px</span></p>
         <p style="font-size: 16px; font-weight: bold;">Sana: Efficient High-Resolution Image Synthesis with Linear Diffusion Transformer</p>
-        <p><span style="font-size: 16px;"><a href="https://arxiv.org/abs/2410.10629">[Paper]</a></span> <span style="font-size: 16px;"><a href="https://github.com/NVlabs/Sana">[Github]</a></span> <span style="font-size: 16px;"><a href="https://nvlabs.github.io/Sana">[Project]</a></span</p>
+        <p><span style="font-size: 16px;"><a href="https://arxiv.org/abs/2410.10629">[Paper]</a></span> <span style="font-size: 16px;"><a href="https://github.com/NVlabs/Sana">[Github]</a></span> <span style="font-size: 16px;"><a href="https://nvlabs.github.io/Sana">[Project]</a></span> <span style="font-size: 16px;"><a href="/ctrlnet">[ControlNet]</a></span></p>
         <p style="font-size: 16px; font-weight: bold;"><a href="/4bit">4Bit version</a> powered by <a href="https://github.com/mit-han-lab/deepcompressor">deepcompressor</a> and <a href="https://github.com/mit-han-lab/nunchaku">nunchaku</a><p>
         <p style="font-size: 16px; font-weight: bold;">Powered by <a href="https://hanlab.mit.edu/projects/dc-ae">DC-AE</a> with 32x latent space.</p>
         <p style="font-size: 16px; font-weight: bold;">Prompts support English, Chinese and emojis.</p>
