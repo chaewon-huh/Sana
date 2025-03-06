@@ -113,13 +113,13 @@ def run(
     seed: int,
     blend_alpha: float,
 ) -> tuple[Image, str]:
-
     print(f"Prompt: {prompt}, cond: {image['composite']}")
+
+    if prompt.strip() == "" and image['composite'] is None:
+        return blank_image, "Please input the prompt or draw something."
+
     image["composite"] = Image.open(image["composite"]).convert('RGB')
     image_numpy = np.array(image["composite"])
-
-    if prompt.strip() == "" and (np.sum(image_numpy == 255) >= 3145628 or np.sum(image_numpy == 0) >= 3145628):
-        return blank_image, "Please input the prompt or draw something."
 
     if safety_check.is_dangerous(safety_checker_tokenizer, safety_checker_model, prompt, threshold=0.2):
         prompt = "A red heart."
@@ -166,7 +166,7 @@ def run(
 model_size = "1.6" if "1600M" in args.model_path else "0.6"
 title = f"""
     <div style='display: flex; align-items: center; justify-content: center; text-align: center;'>
-        <img src="https://raw.githubusercontent.com/NVlabs/Sana/refs/heads/main/asset/logo.png" width="50%" alt="logo"/>
+        <img src="https://raw.githubusercontent.com/NVlabs/Sana/refs/heads/main/asset/logo.png" width="20%" alt="logo"/>
     </div>
 """
 DESCRIPTION = f"""
@@ -214,7 +214,7 @@ with gr.Blocks(css_paths="asset/app_styles/controlnet_app_style.css", title=f"Sa
             with gr.Row():
                 style = gr.Dropdown(label="Style", choices=STYLE_NAMES, value=DEFAULT_STYLE_NAME, scale=1)
                 prompt_template = gr.Textbox(
-                    label="Prompt Style Template", value=STYLES[DEFAULT_STYLE_NAME], scale=2, max_lines=1
+                    label="Prompt Style Template", value=STYLES[DEFAULT_STYLE_NAME], scale=2, max_lines=1, interactive=False
                 )
 
             with gr.Row():
@@ -225,7 +225,6 @@ with gr.Blocks(css_paths="asset/app_styles/controlnet_app_style.css", title=f"Sa
                     step=1,
                     value=2,
                 )
-            with gr.Row():
                 inference_steps = gr.Slider(
                     label="Sampling steps",
                     minimum=5,
@@ -233,6 +232,7 @@ with gr.Blocks(css_paths="asset/app_styles/controlnet_app_style.css", title=f"Sa
                     step=1,
                     value=20,
                 )
+            with gr.Row():
                 guidance_scale = gr.Slider(
                     label="CFG Guidance scale",
                     minimum=1,
@@ -282,7 +282,7 @@ with gr.Blocks(css_paths="asset/app_styles/controlnet_app_style.css", title=f"Sa
         outputs=seed,
         api_name=False,
         queue=False,
-    ).then(run, inputs=run_inputs, outputs=run_outputs, api_name=False)
+    )
 
     style.change(
         lambda x: STYLES[x],
@@ -292,7 +292,7 @@ with gr.Blocks(css_paths="asset/app_styles/controlnet_app_style.css", title=f"Sa
         queue=False,
     ).then(fn=run, inputs=run_inputs, outputs=run_outputs, api_name=False)
     gr.on(
-        triggers=[prompt.submit, run_button.click, canvas.change],
+        triggers=[prompt.submit, run_button.click],
         fn=run,
         inputs=run_inputs,
         outputs=run_outputs,

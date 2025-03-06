@@ -2,6 +2,14 @@
 
 h1{text-align:center}
 
+.wrap {
+  align-items: center;
+}
+
+.contain {
+    max-width: 1200px;
+}
+
 .wrap.svelte-p4aq0j.svelte-p4aq0j {
     display: none;
 }
