@@ -575,7 +575,8 @@
               <strong style="font-size: 18px;">(2) Model Depth Pruning:</strong> A block importance analysis technique for efficient model compression to arbitrary sizes with minimal quality loss.
               <strong style="font-size: 18px;">(3) Inference-time Scaling:</strong>  A repeated sampling strategy that trades computation for model capacity,
               enabling smaller models to match larger model quality at inference time. Through these strategies,
-              SANA-1.5 achieves a text-image alignment score of 0.72 on GenEval, which can be further improved to 0.80 through inference scaling,
+              SANA-1.5 achieves a text-image alignment score of <strong style="font-size: 18px; color: red">0.81</strong> on GenEval,
+              which can be further improved to <strong style="font-size: 18px; color: red">0.96</strong> through inference scaling,
               establishing a new SoTA on GenEval benchmark. These innovations enable efficient model scaling across different compute budgets while maintaining high quality,
               making high-quality image generation more accessible. Our code and pre-trained models will be released.
           </p>
@@ -630,7 +631,7 @@
                 </a> as the judge: With fine-tuned NVILA-2B to automatically compare and judge generated images,
                 we run a tournament-style comparison several rounds until we determine the top-N candidates, as illustrated in the below Figure (a).
                 We demonstrate that with inference scaling: <br>
-                1. Sana-1.5 (4.8B) achieves a <strong style="font-size: 18px; color: red">SoTA 0.80 GenEval score</strong>, as shown in Figure (b). <br>
+                1. Sana-1.5 (4.8B) achieves a <strong style="font-size: 18px; color: red">SoTA 0.96 GenEval score</strong>, as shown in Figure (b). <br>
                 2. Smaller models can outperform larger ones, with performance improvements observed consistently across all model sizes, shown in Figure (c).
             </p>
         </div>
