@@ -1,5 +1,4 @@
 #!/usr/bin/env python
-# coding=utf-8
 # Copyright 2025 The HuggingFace Inc. team. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
@@ -24,8 +23,10 @@ import random
 import shutil
 import warnings
 from pathlib import Path
+from typing import Callable, List, Union
 
 import accelerate
+import diffusers
 import numpy as np
 import torch
 import torch.nn as nn
@@ -38,28 +39,6 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, DistributedType, ProjectConfiguration, set_seed
 from braceexpand import braceexpand
-from huggingface_hub import create_repo, upload_folder
-from huggingface_hub.utils import insecure_hashlib
-from packaging import version
-from peft.utils import get_peft_model_state_dict
-from PIL import Image
-from PIL.ImageOps import exif_transpose
-from safetensors.torch import load_file
-from torch.nn.utils.spectral_norm import SpectralNorm
-from torch.utils.data import default_collate, Dataset
-from torchvision import transforms
-from torchvision.transforms.functional import crop
-from tqdm.auto import tqdm
-from transformers import AutoTokenizer, Gemma2Model
-from typing import Callable, List, Union
-from webdataset.tariterators import (
-    base_plus_ext,
-    tar_file_expander,
-    url_opener,
-    valid_sample,
-)
-
-import diffusers
 from diffusers import (
     AutoencoderDC,
     FlowMatchEulerDiscreteScheduler,
@@ -75,15 +54,24 @@ from diffusers.training_utils import (
     compute_loss_weighting_for_sd3,
     free_memory,
 )
-from diffusers.utils import (
-    check_min_version,
-    convert_unet_state_dict_to_peft,
-    is_wandb_available,
-)
+from diffusers.utils import check_min_version, convert_unet_state_dict_to_peft, is_wandb_available
 from diffusers.utils.hub_utils import load_or_create_model_card, populate_model_card
 from diffusers.utils.import_utils import is_torch_npu_available
 from diffusers.utils.torch_utils import is_compiled_module
-
+from huggingface_hub import create_repo, upload_folder
+from huggingface_hub.utils import insecure_hashlib
+from packaging import version
+from peft.utils import get_peft_model_state_dict
+from PIL import Image
+from PIL.ImageOps import exif_transpose
+from safetensors.torch import load_file
+from torch.nn.utils.spectral_norm import SpectralNorm
+from torch.utils.data import Dataset, default_collate
+from torchvision import transforms
+from torchvision.transforms.functional import crop
+from tqdm.auto import tqdm
+from transformers import AutoTokenizer, Gemma2Model
+from webdataset.tariterators import base_plus_ext, tar_file_expander, url_opener, valid_sample
 
 if is_wandb_available():
     import wandb
@@ -95,7 +83,7 @@ logger = get_logger(__name__)
 
 if is_torch_npu_available():
     torch.npu.config.allow_internal_format = False
-    
+
 complex_human_instruction = [
     "Given a user prompt, generate an 'Enhanced prompt' that provides detailed visual descriptions suitable for image generation. Evaluate the level of detail in the user prompt:",
     "- If the prompt is simple, focus on adding specifics about colors, shapes, sizes, textures, and spatial relationships to create vivid and concrete scenes.",
@@ -106,12 +94,14 @@ complex_human_instruction = [
     "Please generate only the enhanced description for the prompt below and avoid including any additional commentary or evaluations:",
     "User Prompt: ",
 ]
-    
+
+
 def filter_keys(key_set):
     def _f(dictionary):
         return {k: v for k, v in dictionary.items() if k in key_set}
 
     return _f
+
 
 def group_by_keys_nothrow(data, keys=base_plus_ext, lcase=True, suffixes=None, handler=None):
     """Return function over iterator that groups key, value pairs into samples.
@@ -140,12 +130,14 @@ def group_by_keys_nothrow(data, keys=base_plus_ext, lcase=True, suffixes=None, h
     if valid_sample(current_sample):
         yield current_sample
 
+
 def tarfile_to_samples_nothrow(src, handler=wds.warn_and_continue):
     # NOTE this is a re-impl of the webdataset impl with group_by_keys that doesn't throw
     streams = url_opener(src, handler=handler)
     files = tar_file_expander(streams, handler=handler)
     samples = group_by_keys_nothrow(files, handler=handler)
     return samples
+
 
 class WebdatasetFilter:
     def __init__(self, min_size=1024, max_pwatermark=0.5):
@@ -165,7 +157,8 @@ class WebdatasetFilter:
                 return False
         except Exception:
             return False
-    
+
+
 class Text2ImageDataset:
     def __init__(
         self,
@@ -252,6 +245,7 @@ class Text2ImageDataset:
     @property
     def train_dataloader(self):
         return self._train_dataloader
+
 
 # TODO here
 def save_model_card(
@@ -498,9 +492,7 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--train_batch_size", type=int, default=4, help="Batch size (per device) for the training dataloader."
     )
-    parser.add_argument(
-        "--sample_batch_size", type=int, default=4, help="Batch size (per device) for sampling images."
-    )
+    parser.add_argument("--sample_batch_size", type=int, default=4, help="Batch size (per device) for sampling images.")
     parser.add_argument("--num_train_epochs", type=int, default=1)
     parser.add_argument(
         "--max_train_steps",
@@ -589,21 +581,45 @@ def parse_args(input_args=None):
     parser.add_argument(
         "--logit_std", type=float, default=1.6, help="std to use when using the `'logit_normal'` weighting scheme."
     )
-    parser.add_argument("--logit_mean_discriminator", type=float, default=-0.6, help="Logit mean for discriminator timestep sampling")
-    parser.add_argument("--logit_std_discriminator", type=float, default=1.0, help="Logit std for discriminator timestep sampling")
+    parser.add_argument(
+        "--logit_mean_discriminator", type=float, default=-0.6, help="Logit mean for discriminator timestep sampling"
+    )
+    parser.add_argument(
+        "--logit_std_discriminator", type=float, default=1.0, help="Logit std for discriminator timestep sampling"
+    )
     parser.add_argument("--ladd_multi_scale", action="store_true", help="Whether to use multi-scale discriminator")
-    parser.add_argument("--head_block_ids", type=int, nargs="+", default=[2, 8, 14, 19], help="Specify which transformer blocks to use for discriminator heads")
+    parser.add_argument(
+        "--head_block_ids",
+        type=int,
+        nargs="+",
+        default=[2, 8, 14, 19],
+        help="Specify which transformer blocks to use for discriminator heads",
+    )
     parser.add_argument("--adv_lambda", type=float, default=0.5, help="Weighting coefficient for adversarial loss")
     parser.add_argument("--scm_lambda", type=float, default=1.0, help="Weighting coefficient for SCM loss")
     parser.add_argument("--gradient_clip", type=float, default=0.1, help="Threshold for gradient clipping")
-    parser.add_argument("--sigma_data", type=float, default=0.5, help="Standard deviation of data distribution is supposed to be 0.5")
-    parser.add_argument("--tangent_warmup_steps", type=int, default=4000, help="Number of warmup steps for tangent vectors")
-    parser.add_argument("--guidance_embeds_scale", type=float, default=0.1, help="Scaling factor for guidance embeddings")
-    parser.add_argument("--scm_cfg_scale", type=float, nargs="+", default=[4, 4.5, 5], help="Range for classifier-free guidance scale")
-    parser.add_argument("--train_largest_timestep", action="store_true", help="Whether to enable special training for large timesteps")
+    parser.add_argument(
+        "--sigma_data", type=float, default=0.5, help="Standard deviation of data distribution is supposed to be 0.5"
+    )
+    parser.add_argument(
+        "--tangent_warmup_steps", type=int, default=4000, help="Number of warmup steps for tangent vectors"
+    )
+    parser.add_argument(
+        "--guidance_embeds_scale", type=float, default=0.1, help="Scaling factor for guidance embeddings"
+    )
+    parser.add_argument(
+        "--scm_cfg_scale", type=float, nargs="+", default=[4, 4.5, 5], help="Range for classifier-free guidance scale"
+    )
+    parser.add_argument(
+        "--train_largest_timestep", action="store_true", help="Whether to enable special training for large timesteps"
+    )
     parser.add_argument("--largest_timestep", type=float, default=1.57080, help="Maximum timestep value")
-    parser.add_argument("--largest_timestep_prob", type=float, default=0.5, help="Sampling probability for large timesteps")
-    parser.add_argument("--misaligned_pairs_D", action="store_true", help="Add misaligned sample pairs for discriminator")
+    parser.add_argument(
+        "--largest_timestep_prob", type=float, default=0.5, help="Sampling probability for large timesteps"
+    )
+    parser.add_argument(
+        "--misaligned_pairs_D", action="store_true", help="Add misaligned sample pairs for discriminator"
+    )
     parser.add_argument(
         "--optimizer",
         type=str,
@@ -741,7 +757,6 @@ def parse_args(input_args=None):
     if env_local_rank != -1 and env_local_rank != args.local_rank:
         args.local_rank = env_local_rank
 
-
     return args
 
 
@@ -864,7 +879,13 @@ class SanaMSCMDiscriminator(nn.Module):
             if i in self.block_hooks:
                 hooks.append(block.register_forward_hook(get_features))
 
-        self.transformer(hidden_states=hidden_states, timestep=timestep, encoder_hidden_states=encoder_hidden_states, return_logvar=False, **kwargs)
+        self.transformer(
+            hidden_states=hidden_states,
+            timestep=timestep,
+            encoder_hidden_states=encoder_hidden_states,
+            return_logvar=False,
+            **kwargs,
+        )
 
         for hook in hooks:
             hook.remove()
@@ -897,7 +918,8 @@ class DiscHeadModel:
 
     def __getattr__(self, name):
         return getattr(self.disc, name)
-    
+
+
 class SanaTrigFlow(SanaTransformer2DModel):
     def __init__(self, original_model, guidance=False):
         self.__dict__ = original_model.__dict__
@@ -908,8 +930,10 @@ class SanaTrigFlow(SanaTransformer2DModel):
             self.logvar_linear = torch.nn.Linear(hidden_size, 1)
             torch.nn.init.xavier_uniform_(self.logvar_linear.weight)
             torch.nn.init.constant_(self.logvar_linear.bias, 0)
-        
-    def forward(self, hidden_states, encoder_hidden_states, timestep, guidance=None, jvp=False, return_logvar=False, **kwargs):
+
+    def forward(
+        self, hidden_states, encoder_hidden_states, timestep, guidance=None, jvp=False, return_logvar=False, **kwargs
+    ):
         batch_size = hidden_states.shape[0]
         latents = hidden_states
         prompt_embeds = encoder_hidden_states
@@ -931,47 +955,50 @@ class SanaTrigFlow(SanaTransformer2DModel):
 
         if jvp and self.gradient_checkpointing:
             self.gradient_checkpointing = False
-            model_out = super().forward(hidden_states=latent_model_input, encoder_hidden_states=prompt_embeds, timestep=flow_timestep, guidance=guidance, **kwargs)[0]
+            model_out = super().forward(
+                hidden_states=latent_model_input,
+                encoder_hidden_states=prompt_embeds,
+                timestep=flow_timestep,
+                guidance=guidance,
+                **kwargs,
+            )[0]
             self.gradient_checkpointing = True
         else:
-            model_out = super().forward(hidden_states=latent_model_input, encoder_hidden_states=prompt_embeds, timestep=flow_timestep, guidance=guidance, **kwargs)[0]
-
+            model_out = super().forward(
+                hidden_states=latent_model_input,
+                encoder_hidden_states=prompt_embeds,
+                timestep=flow_timestep,
+                guidance=guidance,
+                **kwargs,
+            )[0]
 
         # Flow --> TrigFlow Transformation
-        trigflow_model_out = ((1 - 2 * flow_timestep_expanded) * latent_model_input + (1 - 2 * flow_timestep_expanded + 2 * flow_timestep_expanded**2) * model_out) / torch.sqrt(
-            flow_timestep_expanded**2 + (1 - flow_timestep_expanded) ** 2
-        )
-        
-        
+        trigflow_model_out = (
+            (1 - 2 * flow_timestep_expanded) * latent_model_input
+            + (1 - 2 * flow_timestep_expanded + 2 * flow_timestep_expanded**2) * model_out
+        ) / torch.sqrt(flow_timestep_expanded**2 + (1 - flow_timestep_expanded) ** 2)
+
         if self.guidance and guidance is not None:
-            timestep, embedded_timestep = self.time_embed(
-                timestep, guidance=guidance, hidden_dtype=hidden_states.dtype
-            )
+            timestep, embedded_timestep = self.time_embed(timestep, guidance=guidance, hidden_dtype=hidden_states.dtype)
         else:
             timestep, embedded_timestep = self.time_embed(
                 timestep, batch_size=batch_size, hidden_dtype=hidden_states.dtype
             )
-        
+
         if return_logvar:
             logvar = self.logvar_linear(embedded_timestep) * self.logvar_scale_factor
             return trigflow_model_out, logvar
-        
 
         return (trigflow_model_out,)
 
-        
 
-def compute_density_for_timestep_sampling_scm(
-    batch_size: int, logit_mean: float = None, logit_std: float = None
-):
-    """Compute the density for sampling the timesteps when doing Sana-Sprint training.
-    """
+def compute_density_for_timestep_sampling_scm(batch_size: int, logit_mean: float = None, logit_std: float = None):
+    """Compute the density for sampling the timesteps when doing Sana-Sprint training."""
     sigma = torch.randn(batch_size, device="cpu")
     sigma = (sigma * logit_std + logit_mean).exp()
     u = torch.atan(sigma / 0.5)  # TODO: 0.5 should be a hyper-parameter
 
     return u
-
 
 
 def main(args):
@@ -1025,7 +1052,6 @@ def main(args):
     if args.seed is not None:
         set_seed(args.seed)
 
-
     # Handle the repository creation
     if accelerator.is_main_process:
         if args.output_dir is not None:
@@ -1055,37 +1081,46 @@ def main(args):
         variant=args.variant,
     )
     ori_transformer = SanaTransformer2DModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="transformer", revision=args.revision, variant=args.variant,
-        guidance_embeds=True
-    ).to_empty(device='cpu') # remove meta tensors
-    
+        args.pretrained_model_name_or_path,
+        subfolder="transformer",
+        revision=args.revision,
+        variant=args.variant,
+        guidance_embeds=True,
+    ).to_empty(
+        device="cpu"
+    )  # remove meta tensors
+
     ori_transformer_no_guide = SanaTransformer2DModel.from_pretrained(
-        args.pretrained_model_name_or_path, subfolder="transformer", revision=args.revision, variant=args.variant,
-        guidance_embeds=False
+        args.pretrained_model_name_or_path,
+        subfolder="transformer",
+        revision=args.revision,
+        variant=args.variant,
+        guidance_embeds=False,
     )
-    
-    original_state_dict = load_file(f"{args.pretrained_model_name_or_path}/transformer/diffusion_pytorch_model.safetensors")
-    
+
+    original_state_dict = load_file(
+        f"{args.pretrained_model_name_or_path}/transformer/diffusion_pytorch_model.safetensors"
+    )
+
     param_mapping = {
-        'time_embed.emb.timestep_embedder.linear_1.weight': 'time_embed.timestep_embedder.linear_1.weight',
-        'time_embed.emb.timestep_embedder.linear_1.bias': 'time_embed.timestep_embedder.linear_1.bias',
-        'time_embed.emb.timestep_embedder.linear_2.weight': 'time_embed.timestep_embedder.linear_2.weight',
-        'time_embed.emb.timestep_embedder.linear_2.bias': 'time_embed.timestep_embedder.linear_2.bias',
+        "time_embed.emb.timestep_embedder.linear_1.weight": "time_embed.timestep_embedder.linear_1.weight",
+        "time_embed.emb.timestep_embedder.linear_1.bias": "time_embed.timestep_embedder.linear_1.bias",
+        "time_embed.emb.timestep_embedder.linear_2.weight": "time_embed.timestep_embedder.linear_2.weight",
+        "time_embed.emb.timestep_embedder.linear_2.bias": "time_embed.timestep_embedder.linear_2.bias",
     }
 
     for src_key, dst_key in param_mapping.items():
         if src_key in original_state_dict:
             ori_transformer.load_state_dict({dst_key: original_state_dict[src_key]}, strict=False, assign=True)
-            
+
     transformer = SanaTrigFlow(ori_transformer, guidance=True).train()
     pretrained_model = SanaTrigFlow(ori_transformer_no_guide, guidance=False).eval()
-    
+
     disc = SanaMSCMDiscriminator(
         pretrained_model,
         is_multiscale=args.ladd_multi_scale,
         head_block_ids=args.head_block_ids,
     ).train()
-
 
     transformer.requires_grad_(True)
     pretrained_model.requires_grad_(False)
@@ -1138,7 +1173,6 @@ def main(args):
     if args.gradient_checkpointing:
         transformer.enable_gradient_checkpointing()
 
-
     def unwrap_model(model):
         model = accelerator.unwrap_model(model)
         model = model._orig_mod if is_compiled_module(model) else model
@@ -1157,10 +1191,7 @@ def main(args):
                     # Handle discriminator model (only save heads)
                     elif isinstance(unwrapped_model, type(unwrap_model(disc))):
                         # Save only the heads
-                        torch.save(
-                            unwrapped_model.heads.state_dict(),
-                            os.path.join(output_dir, "disc_heads.pt")
-                        )
+                        torch.save(unwrapped_model.heads.state_dict(), os.path.join(output_dir, "disc_heads.pt"))
                     else:
                         raise ValueError(f"unexpected save model: {unwrapped_model.__class__}")
 
@@ -1196,7 +1227,6 @@ def main(args):
         accelerator.register_save_state_pre_hook(save_model_hook)
         accelerator.register_load_state_pre_hook(load_model_hook)
 
-
     # Enable TF32 for faster training on Ampere GPUs,
     # cf https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices
     if args.allow_tf32 and torch.cuda.is_available():
@@ -1212,14 +1242,11 @@ def main(args):
         try:
             import bitsandbytes as bnb
         except ImportError:
-            raise ImportError(
-                "To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`."
-            )
+            raise ImportError("To use 8-bit Adam, please install the bitsandbytes library: `pip install bitsandbytes`.")
 
         optimizer_class = bnb.optim.AdamW8bit
     else:
         optimizer_class = torch.optim.AdamW
-
 
     # Optimization parameters
     optimizer_G = optimizer_class(
@@ -1237,10 +1264,9 @@ def main(args):
         weight_decay=args.adam_weight_decay,
         eps=args.adam_epsilon,
     )
-    
 
     # Dataset and DataLoaders creation:
-    
+
     train_dataset = Text2ImageDataset(
         train_shards_path_or_url=args.train_shards_path_or_url,
         num_train_examples=args.max_train_samples,
@@ -1339,7 +1365,7 @@ def main(args):
         disable=not accelerator.is_local_main_process,
     )
 
-    phase = 'G'
+    phase = "G"
     vae_config_scaling_factor = vae.config.scaling_factor
     sigma_data = args.sigma_data
     negative_prompt = [""] * args.train_batch_size
@@ -1381,12 +1407,10 @@ def main(args):
                 logit_std=args.logit_std,
             )
 
-
             # Add noise according to TrigFlow.
             # zt = cos(t) * x + sin(t) * noise
             t = u.view(-1, 1, 1, 1)
-            noisy_model_input = torch.cos(t) * model_input + torch.sin(t) * noise     
-            
+            noisy_model_input = torch.cos(t) * model_input + torch.sin(t) * noise
 
             scm_cfg_scale = torch.tensor(
                 np.random.choice(args.scm_cfg_scale, size=bsz, replace=True),
@@ -1395,10 +1419,16 @@ def main(args):
 
             def model_wrapper(scaled_x_t, t):
                 pred = accelerator.unwrap_model(transformer)(
-                    hidden_states=scaled_x_t, timestep=t.flatten(), encoder_hidden_states=prompt_embeds, encoder_attention_mask=prompt_attention_mask, guidance=(scm_cfg_scale * args.guidance_embeds_scale), jvp=True, return_logvar=True
+                    hidden_states=scaled_x_t,
+                    timestep=t.flatten(),
+                    encoder_hidden_states=prompt_embeds,
+                    encoder_attention_mask=prompt_attention_mask,
+                    guidance=(scm_cfg_scale * args.guidance_embeds_scale),
+                    jvp=True,
+                    return_logvar=True,
                 )[0]
                 return pred
-            
+
             if phase == "G":
                 transformer.train()
                 disc.eval()
@@ -1410,9 +1440,11 @@ def main(args):
                         cfg_y = torch.cat([negative_prompt_embeds, prompt_embeds], dim=0)
                         cfg_y_mask = torch.cat([negative_prompt_attention_mask, prompt_attention_mask], dim=0)
 
-
                         cfg_pretrain_pred = pretrained_model(
-                            hidden_states=(cfg_x_t / sigma_data), timestep=cfg_t.flatten(), encoder_hidden_states=cfg_y, encoder_attention_mask=cfg_y_mask
+                            hidden_states=(cfg_x_t / sigma_data),
+                            timestep=cfg_t.flatten(),
+                            encoder_hidden_states=cfg_y,
+                            encoder_attention_mask=cfg_y_mask,
                         )
 
                         cfg_dxt_dt = sigma_data * cfg_pretrain_pred
@@ -1421,7 +1453,6 @@ def main(args):
 
                         scm_cfg_scale = scm_cfg_scale.view(-1, 1, 1, 1)
                         dxt_dt = dxt_dt_uncond + scm_cfg_scale * (dxt_dt - dxt_dt_uncond)
-
 
                     v_x = torch.cos(t) * torch.sin(t) * dxt_dt / sigma_data
                     v_t = torch.cos(t) * torch.sin(t)
@@ -1433,12 +1464,12 @@ def main(args):
                         )
 
                     F_theta, logvar = transformer(
-                        hidden_states = (noisy_model_input / sigma_data),
+                        hidden_states=(noisy_model_input / sigma_data),
                         timestep=t.flatten(),
                         encoder_hidden_states=prompt_embeds,
                         encoder_attention_mask=prompt_attention_mask,
                         guidance=(scm_cfg_scale * args.guidance_embeds_scale),
-                        return_logvar=True
+                        return_logvar=True,
                     )
 
                     logvar = logvar.view(-1, 1, 1, 1)
@@ -1471,8 +1502,7 @@ def main(args):
                     loss_no_logvar = loss_no_logvar.mean()
                     loss_no_weight = l2_loss.mean()
                     g_norm = g_norm.mean()
-                    
-                    
+
                     pred_x_0 = torch.cos(t) * noisy_model_input - torch.sin(t) * F_theta * sigma_data
 
                     if args.train_largest_timestep:
@@ -1491,7 +1521,7 @@ def main(args):
                         x_t_new = torch.cos(t_new) * model_input + torch.sin(t_new) * z_new
 
                         F_theta = transformer(
-                            hidden_states = (x_t_new / sigma_data),
+                            hidden_states=(x_t_new / sigma_data),
                             timestep=t_new.flatten(),
                             encoder_hidden_states=prompt_embeds,
                             encoder_attention_mask=prompt_attention_mask,
@@ -1499,7 +1529,6 @@ def main(args):
                             return_logvar=False,
                             jvp=False,
                         )
-
 
                         pred_x_0 = torch.cos(t_new) * x_t_new - torch.sin(t_new) * F_theta * sigma_data
 
@@ -1514,12 +1543,15 @@ def main(args):
                     # Add noise to predicted x0
                     z_D = torch.randn_like(model_input) * sigma_data
                     noised_predicted_x0 = torch.cos(t_D) * pred_x_0 + torch.sin(t_D) * z_D
-                    
 
                     # Calculate adversarial loss
-                    pred_fake = disc(hidden_states=(noised_predicted_x0 / sigma_data), timestep=t_D.flatten(), encoder_hidden_states=prompt_embeds, encoder_attention_mask=prompt_attention_mask)
+                    pred_fake = disc(
+                        hidden_states=(noised_predicted_x0 / sigma_data),
+                        timestep=t_D.flatten(),
+                        encoder_hidden_states=prompt_embeds,
+                        encoder_attention_mask=prompt_attention_mask,
+                    )
                     adv_loss = -torch.mean(pred_fake)
-
 
                     # Total loss = sCM loss + LADD loss
 
@@ -1530,7 +1562,6 @@ def main(args):
                     accelerator.backward(total_loss)
 
                     g_step += 1
-
 
                     if accelerator.sync_gradients:
                         grad_norm = accelerator.clip_grad_norm_(transformer.parameters(), args.gradient_clip)
@@ -1546,7 +1577,7 @@ def main(args):
                         optimizer_G.step()
                         lr_scheduler.step()
                         optimizer_G.zero_grad(set_to_none=True)
-                
+
             elif phase == "D":
                 transformer.eval()
                 disc.train()
@@ -1566,7 +1597,7 @@ def main(args):
                             x_t = torch.cos(t) * model_input + torch.sin(t) * z_new
 
                         F_theta = transformer(
-                            hidden_states = (x_t_new / sigma_data),
+                            hidden_states=(x_t_new / sigma_data),
                             timestep=t_new.flatten(),
                             encoder_hidden_states=prompt_embeds,
                             encoder_attention_mask=prompt_attention_mask,
@@ -1614,11 +1645,20 @@ def main(args):
                         prompt_embeds = torch.cat([prompt_embeds, prompt_embeds], dim=0)
                         prompt_attention_mask = torch.cat([prompt_attention_mask, prompt_attention_mask], dim=0)
 
-
                     # Calculate D loss
-                    
-                    pred_fake = disc(hidden_states=(noised_predicted_x0 / sigma_data), timestep=t_D_fake.flatten(), encoder_hidden_states=prompt_embeds, encoder_attention_mask=prompt_attention_mask)
-                    pred_true = disc(hidden_states=(noised_latents / sigma_data), timestep=t_D_real.flatten(), encoder_hidden_states=prompt_embeds, encoder_attention_mask=prompt_attention_mask)
+
+                    pred_fake = disc(
+                        hidden_states=(noised_predicted_x0 / sigma_data),
+                        timestep=t_D_fake.flatten(),
+                        encoder_hidden_states=prompt_embeds,
+                        encoder_attention_mask=prompt_attention_mask,
+                    )
+                    pred_true = disc(
+                        hidden_states=(noised_latents / sigma_data),
+                        timestep=t_D_real.flatten(),
+                        encoder_hidden_states=prompt_embeds,
+                        encoder_attention_mask=prompt_attention_mask,
+                    )
 
                     # hinge loss
                     loss_real = torch.mean(F.relu(1.0 - pred_true))
@@ -1628,7 +1668,6 @@ def main(args):
                     loss_D = loss_D / args.gradient_accumulation_steps
 
                     accelerator.backward(loss_D)
-
 
                     if accelerator.sync_gradients:
                         grad_norm = accelerator.clip_grad_norm_(disc.parameters(), args.gradient_clip)
@@ -1643,7 +1682,6 @@ def main(args):
 
                         optimizer_D.step()
                         optimizer_D.zero_grad(set_to_none=True)
-                
 
             # Checks if the accelerator has performed an optimization step behind the scenes
             if accelerator.sync_gradients:
@@ -1676,7 +1714,11 @@ def main(args):
                         accelerator.save_state(save_path)
                         logger.info(f"Saved state to {save_path}")
 
-            logs = {"scm_loss": loss.detach().item(), "adv_loss": adv_loss.detach().item(), "lr": lr_scheduler.get_last_lr()[0]}
+            logs = {
+                "scm_loss": loss.detach().item(),
+                "adv_loss": adv_loss.detach().item(),
+                "lr": lr_scheduler.get_last_lr()[0],
+            }
             progress_bar.set_postfix(**logs)
             accelerator.log(logs, step=global_step)
 
@@ -1717,14 +1759,14 @@ def main(args):
             transformer.to(torch.float32)
         else:
             transformer = transformer.to(weight_dtype)
-            
+
         # Save discriminator heads
         disc = unwrap_model(disc)
         disc_heads_state_dict = disc.heads.state_dict()
-        
+
         # Save transformer model
         transformer.save_pretrained(os.path.join(args.output_dir, "transformer"))
-        
+
         # Save discriminator heads
         torch.save(disc_heads_state_dict, os.path.join(args.output_dir, "disc_heads.pt"))
 
