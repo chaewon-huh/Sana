@@ -265,7 +265,7 @@ def save_model_card(
             )
 
     model_description = f"""
-# Sana DreamBooth LoRA - {repo_id}
+# Sana SPRINT LoRA - {repo_id}
 
 <Gallery />
 
