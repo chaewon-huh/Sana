@@ -8,3 +8,4 @@ from .scheduler.flow_euler_sampler import FlowEuler
 from .scheduler.iddpm import Scheduler
 from .scheduler.sa_sampler import SASolverSampler
 from .scheduler.scm_scheduler import SCMScheduler
+from diffusion.scheduler.trigflow_scheduler import TrigFlowScheduler
