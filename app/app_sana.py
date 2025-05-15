@@ -247,7 +247,7 @@ def generate(
     style: str = DEFAULT_STYLE_NAME,
     use_negative_prompt: bool = False,
     num_imgs: int = 1,
-    seed: int = 0,
+    seed: int = 50,
     height: int = 1024,
     width: int = 1024,
     flow_dpms_guidance_scale: float = 5.0,
@@ -435,9 +435,9 @@ with gr.Blocks(css=css, title="Sana", delete_cache=(86400, 86400)) as demo:
                 minimum=0,
                 maximum=MAX_SEED,
                 step=1,
-                value=0,
+                value=50,
             )
-            randomize_seed = gr.Checkbox(label="Randomize seed", value=True)
+            randomize_seed = gr.Checkbox(label="Randomize seed", value=False)
             with gr.Row(visible=True):
                 schedule = gr.Radio(
                     show_label=True,

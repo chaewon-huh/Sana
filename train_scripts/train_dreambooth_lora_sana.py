@@ -256,7 +256,7 @@ def parse_args(input_args=None):
         "--instance_prompt",
         type=str,
         default=None,
-        required=True,
+        required=False,
         help="The prompt with identifier specifying the instance, e.g. 'photo of a TOK dog', 'in the style of TOK'",
     )
     parser.add_argument(
@@ -611,6 +611,21 @@ def parse_args(input_args=None):
         if args.class_prompt is not None:
             warnings.warn("You need not use --class_prompt without --with_prior_preservation.")
 
+    if args.instance_prompt is None:
+        # --instance_prompt가 제공되지 않은 경우, --instance_data_dir와 --caption_column을 통해
+        # metadata.jsonl에서 모든 프롬프트를 가져오는 경우여야 합니다.
+        # 그렇지 않다면 --instance_prompt는 필수입니다.
+        is_metadata_case_for_prompts = args.instance_data_dir is not None and args.caption_column is not None
+        
+        # args.dataset_name과 args.instance_data_dir는 상호 배타적이므로,
+        # is_metadata_case_for_prompts가 False이면 args.dataset_name이 사용되거나
+        # args.instance_data_dir이 --caption_column 없이 사용되는 경우를 포함합니다.
+        if not is_metadata_case_for_prompts:
+            raise ValueError(
+                "--instance_prompt is required unless using --instance_data_dir with --caption_column "
+                "to provide all prompts via a metadata.jsonl file."
+            )
+
     return args
 
 
@@ -638,9 +653,26 @@ class DreamBoothDataset(Dataset):
         self.custom_instance_prompts = None
         self.class_prompt = class_prompt
 
+        # DEBUG: Print initial arguments
+        logger.info("DreamBoothDataset __init__ called.")
+        logger.info(f"  Instance data root: {instance_data_root}")
+        logger.info(f"  Instance prompt (default): {instance_prompt}")
+        logger.info(f"  Args dataset_name: {args.dataset_name}")
+        logger.info(f"  Args instance_data_dir: {args.instance_data_dir}")
+        logger.info(f"  Args image_column: {args.image_column}")
+        logger.info(f"  Args caption_column: {args.caption_column}")
+        logger.info(f"  Args repeats: {repeats}")
+
+
+        # Store image paths and prompts
+        self.instance_image_paths = []
+        self.prompts_for_paths = []
+
+
         # if --dataset_name is provided or a metadata jsonl file is provided in the local --instance_data directory,
         # we load the training data using load_dataset
         if args.dataset_name is not None:
+            logger.info(f"Loading dataset from HuggingFace Hub: {args.dataset_name}")
             try:
                 from datasets import load_dataset
             except ImportError:
@@ -659,127 +691,313 @@ class DreamBoothDataset(Dataset):
             )
             # Preprocessing the datasets.
             column_names = dataset["train"].column_names
+            logger.info(f"  Dataset loaded. Columns: {column_names}. Num train examples: {len(dataset['train'])}")
+
 
             # 6. Get the column names for input/target.
             if args.image_column is None:
                 image_column = column_names[0]
-                logger.info(f"image column defaulting to {image_column}")
+                logger.info(f"  Image column defaulting to {image_column}")
             else:
                 image_column = args.image_column
                 if image_column not in column_names:
                     raise ValueError(
                         f"`--image_column` value '{args.image_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
                     )
-            instance_images = dataset["train"][image_column]
+            # instance_images_data here can be PIL Images or paths, depending on the dataset
+            raw_instance_images_data = dataset["train"][image_column]
+            logger.info(f"  Raw instance images data type: {type(raw_instance_images_data)}")
+            if hasattr(raw_instance_images_data, '__len__'):
+                 logger.info(f"  Number of items in raw_instance_images_data: {len(raw_instance_images_data)}")
+            if len(raw_instance_images_data) > 0:
+                logger.info(f"  First item of raw_instance_images_data: {raw_instance_images_data[0]}")
 
+
+            temp_custom_prompts = None
             if args.caption_column is None:
                 logger.info(
-                    "No caption column provided, defaulting to instance_prompt for all images. If your dataset "
+                    "  No caption column provided, defaulting to instance_prompt for all images. If your dataset "
                     "contains captions/prompts for the images, make sure to specify the "
                     "column as --caption_column"
                 )
-                self.custom_instance_prompts = None
             else:
                 if args.caption_column not in column_names:
                     raise ValueError(
                         f"`--caption_column` value '{args.caption_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
                     )
-                custom_instance_prompts = dataset["train"][args.caption_column]
-                # create final list of captions according to --repeats
-                self.custom_instance_prompts = []
-                for caption in custom_instance_prompts:
-                    self.custom_instance_prompts.extend(itertools.repeat(caption, repeats))
-        else:
+                custom_instance_prompts_data = dataset["train"][args.caption_column]
+                logger.info(f"  Number of items in custom_instance_prompts_data: {len(custom_instance_prompts_data)}")
+                if len(custom_instance_prompts_data) > 0:
+                    logger.info(f"  First item of custom_instance_prompts_data: {custom_instance_prompts_data[0]}")
+                temp_custom_prompts = list(custom_instance_prompts_data)
+
+            # Populate instance_image_paths and prompts_for_paths
+            for i, img_data_or_path in enumerate(raw_instance_images_data):
+                self.instance_image_paths.extend(itertools.repeat(img_data_or_path, repeats))
+                current_prompt_for_image = self.instance_prompt
+                if temp_custom_prompts:
+                    current_prompt_for_image = temp_custom_prompts[i] if temp_custom_prompts[i] else self.instance_prompt
+                self.prompts_for_paths.extend(itertools.repeat(current_prompt_for_image, repeats))
+            
+            if temp_custom_prompts: # If custom captions were used, set self.custom_instance_prompts to signal this
+                self.custom_instance_prompts = self.prompts_for_paths # or just True, if only used as a flag later
+            else:
+                self.custom_instance_prompts = None # No custom captions from dataset
+
+
+        else: # args.instance_data_dir is provided
+            logger.info(f"Loading data from instance_data_dir: {instance_data_root}")
             self.instance_data_root = Path(instance_data_root)
             if not self.instance_data_root.exists():
-                raise ValueError("Instance images root doesn't exists.")
+                raise ValueError(f"Instance images root doesn't exist: {self.instance_data_root}")
 
-            instance_images = [Image.open(path) for path in list(Path(instance_data_root).iterdir())]
-            self.custom_instance_prompts = None
+            metadata_file = self.instance_data_root / "metadata.jsonl"
+            logger.info(f"  Looking for metadata file: {metadata_file}")
+            
+            raw_image_identifiers = [] # Can be paths or other identifiers
+            temp_custom_prompts_from_metadata = None
 
-        self.instance_images = []
-        for img in instance_images:
-            self.instance_images.extend(itertools.repeat(img, repeats))
+            if metadata_file.exists():
+                logger.info(f"  Metadata file found: {metadata_file}")
+                try:
+                    from datasets import load_dataset
+                except ImportError:
+                    raise ImportError(
+                        "You are trying to load your data using the datasets library. If you wish to train using custom "
+                        "captions please install the datasets library: `pip install datasets`."
+                    )
+                dataset = load_dataset(
+                    "json",
+                    data_files=str(metadata_file),
+                    cache_dir=args.cache_dir,
+                )["train"] # Access the 'train' split directly
+                column_names = dataset.column_names
+                logger.info(f"  Metadata dataset loaded. Columns: {column_names}. Num examples: {len(dataset)}")
 
-        self.pixel_values = []
-        train_resize = transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR)
-        train_crop = transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size)
-        train_flip = transforms.RandomHorizontalFlip(p=1.0)
-        train_transforms = transforms.Compose(
+                if args.image_column is None:
+                    image_column = "file_name" # Default for metadata.jsonl
+                    logger.info(f"  Image column defaulting to {image_column} for metadata.jsonl")
+                else:
+                    image_column = args.image_column
+
+                if image_column not in column_names :
+                    if "file_name" in column_names:
+                        logger.warning(f"  Image column '{args.image_column}' not found, defaulting to 'file_name'.")
+                        image_column = "file_name"
+                    else:
+                        raise ValueError(
+                            f"`--image_column` value '{args.image_column}' (or default 'file_name') not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
+                        )
+                
+                logger.info(f"  Using image_column: {image_column}")
+
+
+                # We need to ensure the image paths are absolute or relative to the instance_data_dir
+                def get_full_path(image_path_str_or_pil):
+                    if not isinstance(image_path_str_or_pil, (str, Path)):
+                        # logger.warning(f"    Image path is not a string or Path: {image_path_str_or_pil} (type: {type(image_path_str_or_pil)}). Returning as is.")
+                        return image_path_str_or_pil # Could be PIL.Image if dataset loaded it directly
+                    if os.path.isabs(image_path_str_or_pil):
+                        return image_path_str_or_pil
+                    return str(self.instance_data_root / image_path_str_or_pil)
+
+                raw_image_identifiers = [get_full_path(path) for path in dataset[image_column]]
+                logger.info(f"  Number of image paths/identifiers from metadata: {len(raw_image_identifiers)}")
+                if len(raw_image_identifiers) > 0:
+                    logger.info(f"  First image path/identifier from metadata: {raw_image_identifiers[0]}")
+
+
+                resolved_caption_column = args.caption_column
+                if resolved_caption_column is None:
+                    if "text" in column_names :
+                        resolved_caption_column = "text"
+                        logger.info(
+                        "  No caption column provided, defaulting to 'text' for all images from metadata.jsonl."
+                        )
+                    else:
+                        logger.info(
+                            "  No caption column provided (and 'text' not in metadata), defaulting to instance_prompt for all images."
+                        )
+                
+                logger.info(f"  Using caption_column: {resolved_caption_column}")
+
+                if resolved_caption_column is not None and resolved_caption_column in column_names:
+                    custom_instance_prompts_data = dataset[resolved_caption_column]
+                    logger.info(f"  Number of captions from metadata: {len(custom_instance_prompts_data)}")
+                    if len(custom_instance_prompts_data) > 0:
+                        logger.info(f"  First caption from metadata: {custom_instance_prompts_data[0]}")
+                    temp_custom_prompts_from_metadata = list(custom_instance_prompts_data)
+
+                elif resolved_caption_column is not None and resolved_caption_column not in column_names:
+                     raise ValueError(
+                        f"`--caption_column` value '{resolved_caption_column}' not found in dataset columns. Dataset columns are: {', '.join(column_names)}"
+                    )
+            else: # No metadata.jsonl, load all images from the directory
+                logger.info(f"  Metadata file NOT found at {metadata_file}. Loading all images from directory {instance_data_root}.")
+                raw_image_identifiers = [p for p in Path(instance_data_root).iterdir() if p.is_file()] # Ensure they are files
+                logger.info(f"  Found {len(raw_image_identifiers)} image files in directory.")
+                if len(raw_image_identifiers) > 0:
+                    logger.info(f"  First image path from directory: {raw_image_identifiers[0]}")
+
+            # Populate instance_image_paths and prompts_for_paths
+            for i, img_path_or_data in enumerate(raw_image_identifiers):
+                self.instance_image_paths.extend(itertools.repeat(img_path_or_data, repeats))
+                current_prompt_for_image = self.instance_prompt
+                if temp_custom_prompts_from_metadata:
+                    current_prompt_for_image = temp_custom_prompts_from_metadata[i] if temp_custom_prompts_from_metadata[i] else self.instance_prompt
+                self.prompts_for_paths.extend(itertools.repeat(current_prompt_for_image, repeats))
+
+            if temp_custom_prompts_from_metadata:
+                self.custom_instance_prompts = self.prompts_for_paths
+            else:
+                self.custom_instance_prompts = None
+
+
+        logger.info(f"Total number of instance image paths after processing and repeats: {len(self.instance_image_paths)}")
+        if self.custom_instance_prompts:
+            logger.info(f"Total number of corresponding prompts: {len(self.prompts_for_paths)}")
+            if len(self.prompts_for_paths) > 0:
+                logger.info(f"First prompt in list: {self.prompts_for_paths[0]}")
+        else:
+             logger.info(f"Using default instance_prompt for all images: {self.instance_prompt}")
+
+
+        # Define transformations
+        self.train_resize = transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR)
+        self.train_crop = transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size)
+        self.train_flip = transforms.RandomHorizontalFlip(p=1.0) # Will be controlled by random.random()
+        self.train_transforms = transforms.Compose(
             [
                 transforms.ToTensor(),
                 transforms.Normalize([0.5], [0.5]),
             ]
         )
-        for image in self.instance_images:
-            image = exif_transpose(image)
-            if not image.mode == "RGB":
-                image = image.convert("RGB")
-            image = train_resize(image)
-            if args.random_flip and random.random() < 0.5:
-                # flip
-                image = train_flip(image)
-            if args.center_crop:
-                y1 = max(0, int(round((image.height - args.resolution) / 2.0)))
-                x1 = max(0, int(round((image.width - args.resolution) / 2.0)))
-                image = train_crop(image)
-            else:
-                y1, x1, h, w = train_crop.get_params(image, (args.resolution, args.resolution))
-                image = crop(image, y1, x1, h, w)
-            image = train_transforms(image)
-            self.pixel_values.append(image)
 
-        self.num_instance_images = len(self.instance_images)
+        self.num_instance_images = len(self.instance_image_paths)
         self._length = self.num_instance_images
+        logger.info(f"  num_instance_images (paths): {self.num_instance_images}")
 
         if class_data_root is not None:
+            logger.info(f"Processing class images from: {class_data_root}")
             self.class_data_root = Path(class_data_root)
             self.class_data_root.mkdir(parents=True, exist_ok=True)
-            self.class_images_path = list(self.class_data_root.iterdir())
+            self.class_images_path = list(self.class_data_root.iterdir()) # These are paths
+            logger.info(f"  Found {len(self.class_images_path)} class images in directory.")
             if class_num is not None:
                 self.num_class_images = min(len(self.class_images_path), class_num)
             else:
                 self.num_class_images = len(self.class_images_path)
-            self._length = max(self.num_class_images, self.num_instance_images)
+            self._length = max(self.num_class_images, self.num_instance_images) # _length determines iteration count
+            logger.info(f"  num_class_images to be used: {self.num_class_images}")
+             # Class image transforms (can be simpler if not augmenting as heavily)
+            self.class_image_transforms = transforms.Compose(
+                [
+                    transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
+                    transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size), # Matching instance for consistency
+                    transforms.ToTensor(),
+                    transforms.Normalize([0.5], [0.5]),
+                ]
+            )
         else:
             self.class_data_root = None
+            self.num_class_images = 0
+            logger.info("No class_data_root provided.")
 
-        self.image_transforms = transforms.Compose(
-            [
-                transforms.Resize(size, interpolation=transforms.InterpolationMode.BILINEAR),
-                transforms.CenterCrop(size) if center_crop else transforms.RandomCrop(size),
-                transforms.ToTensor(),
-                transforms.Normalize([0.5], [0.5]),
-            ]
-        )
+        logger.info(f"Final dataset length (_length): {self._length}")
+
 
     def __len__(self):
+        # logger.info(f"DreamBoothDataset __len__ called, returning: {self._length}")
         return self._length
 
     def __getitem__(self, index):
+        # logger.info(f"DreamBoothDataset __getitem__ called with index: {index}")
         example = {}
-        instance_image = self.pixel_values[index % self.num_instance_images]
-        example["instance_images"] = instance_image
+        
+        # Instance image and prompt processing
+        # Use modulo for image path and prompt to correctly cycle through available data if _length > num_instance_images
+        # (e.g. when prior preservation is on and num_class_images is larger)
+        current_image_index = index % self.num_instance_images
+        img_path_or_data = self.instance_image_paths[current_image_index]
 
-        if self.custom_instance_prompts:
-            caption = self.custom_instance_prompts[index % self.num_instance_images]
-            if caption:
-                example["instance_prompt"] = caption
-            else:
-                example["instance_prompt"] = self.instance_prompt
+        try:
+            if isinstance(img_path_or_data, (str, Path)):
+                image = Image.open(img_path_or_data)
+            else: # Assuming it's already a PIL Image object (e.g., from certain Hugging Face datasets)
+                image = img_path_or_data
+        except Exception as e:
+            logger.error(f"Error loading instance image {img_path_or_data} at index {current_image_index}: {e}")
+            # Fallback: return a dummy tensor and a generic prompt, or skip this item by raising an error
+            # For now, let's try to return something to avoid crashing the training loop immediately
+            # A better solution might be to filter out bad images beforehand or handle this in collate_fn
+            dummy_tensor = torch.zeros((3, self.size, self.size))
+            example["instance_images"] = dummy_tensor
+            example["instance_prompt"] = self.instance_prompt # Default prompt
+            # If class images are also expected, handle that too
+            if self.class_data_root:
+                 example["class_images"] = torch.zeros((3, self.size, self.size))
+                 example["class_prompt"] = self.class_prompt
+            return example
 
-        else:  # custom prompts were provided, but length does not match size of image dataset
-            example["instance_prompt"] = self.instance_prompt
 
-        if self.class_data_root:
-            class_image = Image.open(self.class_images_path[index % self.num_class_images])
-            class_image = exif_transpose(class_image)
+        image = exif_transpose(image)
+        if not image.mode == "RGB":
+            image = image.convert("RGB")
 
-            if not class_image.mode == "RGB":
-                class_image = class_image.convert("RGB")
-            example["class_images"] = self.image_transforms(class_image)
-            example["class_prompt"] = self.class_prompt
+        image_resized = self.train_resize(image)
 
+        if args.random_flip and random.random() < 0.5:
+            image_flipped = self.train_flip(image_resized)
+        else:
+            image_flipped = image_resized
+        
+        if args.center_crop: # self.center_crop
+            # y1 = max(0, int(round((image_flipped.height - args.resolution) / 2.0))) # args.resolution or self.size
+            # x1 = max(0, int(round((image_flipped.width - args.resolution) / 2.0)))
+            image_cropped = self.train_crop(image_flipped) # CenterCrop itself uses args.resolution
+        else:
+            y1, x1, h, w = self.train_crop.get_params(image_flipped, (args.resolution, args.resolution))
+            image_cropped = crop(image_flipped, y1, x1, h, w)
+        
+        instance_image_tensor = self.train_transforms(image_cropped)
+        example["instance_images"] = instance_image_tensor
+        # logger.info(f"  Instance image tensor shape for index {index}: {instance_image_tensor.shape}")
+
+        current_prompt = ""
+        if self.custom_instance_prompts: # This list is now self.prompts_for_paths
+            # prompt_index = index % len(self.prompts_for_paths) # Should be same length as instance_image_paths now
+            prompt_index = current_image_index # Use the same index as the image path
+            caption = self.prompts_for_paths[prompt_index]
+            if caption: 
+                current_prompt = caption
+            else: 
+                current_prompt = self.instance_prompt
+        else:
+            current_prompt = self.instance_prompt
+        
+        example["instance_prompt"] = current_prompt
+
+        if self.class_data_root and self.num_class_images > 0 : # Check num_class_images > 0
+            # logger.info(f"  Processing class image for index {index}")
+            class_image_path = self.class_images_path[index % self.num_class_images]
+            # logger.info(f"    Loading class image from: {class_image_path}")
+            try:
+                class_image = Image.open(class_image_path)
+                class_image = exif_transpose(class_image)
+
+                if not class_image.mode == "RGB":
+                    class_image = class_image.convert("RGB")
+                example["class_images"] = self.class_image_transforms(class_image) # Use class_image_transforms
+                example["class_prompt"] = self.class_prompt
+            except Exception as e:
+                logger.error(f"Error loading class image {class_image_path}: {e}")
+                # Fallback for class image
+                example["class_images"] = torch.zeros((3, self.size, self.size)) # Dummy tensor
+                example["class_prompt"] = self.class_prompt
+
+            # logger.info(f"    Class image tensor shape: {example['class_images'].shape}, Class prompt: '{example['class_prompt']}'")
+        
+        # logger.info(f"  Returning example for index {index}: {list(example.keys())}")
         return example
 
 
@@ -1442,7 +1660,7 @@ def main(args):
                 break
 
         if accelerator.is_main_process:
-            if args.validation_prompt is not None and epoch % args.validation_epochs == 0:
+            if args.validation_prompt is not None and global_step % args.validation_epochs == 0:
                 # create pipeline
                 pipeline = SanaPipeline.from_pretrained(
                     args.pretrained_model_name_or_path,
@@ -1460,7 +1678,8 @@ def main(args):
                     args=args,
                     accelerator=accelerator,
                     pipeline_args=pipeline_args,
-                    epoch=epoch,
+                    epoch=global_step,
+                    is_final_validation=True,
                 )
                 free_memory()
 
@@ -1506,7 +1725,7 @@ def main(args):
                 args=args,
                 accelerator=accelerator,
                 pipeline_args=pipeline_args,
-                epoch=epoch,
+                epoch=global_step,
                 is_final_validation=True,
             )
 

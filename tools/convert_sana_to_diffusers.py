@@ -5,6 +5,7 @@ import argparse
 import os
 from contextlib import nullcontext
 
+# import numpy
 import torch
 from accelerate import init_empty_weights
 from diffusers import (
@@ -64,6 +65,7 @@ def main(args):
         file_path = args.orig_ckpt_path
 
     print(colored(f"Loading checkpoint from {file_path}", "green", attrs=["bold"]))
+    # torch.serialization.add_safe_globals([numpy._core.multiarray._reconstruct])
     all_state_dict = torch.load(file_path, weights_only=True)
     state_dict = all_state_dict.pop("state_dict")
     converted_state_dict = {}
@@ -292,10 +294,11 @@ def main(args):
     else:
         print(colored(f"Saving the whole Pipeline containing {args.model_type}", "green", attrs=["bold"]))
         # VAE
-        ae = AutoencoderDC.from_pretrained("mit-han-lab/dc-ae-f32c32-sana-1.1-diffusers", torch_dtype=torch.float32)
+        # ae = AutoencoderDC.from_pretrained("mit-han-lab/dc-ae-f32c32-sana-1.1-diffusers", torch_dtype=torch.float32)
+        ae = AutoencoderDC.from_pretrained("mit-han-lab/dc-ae-f32c32-sana-1.0-diffusers", torch_dtype=torch.float32)
 
         # Text Encoder
-        text_encoder_model_path = "Efficient-Large-Model/gemma-2-2b-it"
+        text_encoder_model_path = "google/gemma-2-2b-it"
         tokenizer = AutoTokenizer.from_pretrained(text_encoder_model_path)
         tokenizer.padding_side = "right"
         text_encoder = AutoModelForCausalLM.from_pretrained(

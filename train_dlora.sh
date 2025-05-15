@@ -1,0 +1,22 @@
+export MODEL_NAME="/workspace/model/diffusers/Sana_eng_baseline_v2"
+export INSTANCE_DATA_DIR="/workspace/data/dreambooth_test_out_lora"
+export OUTPUT_DIR="/workspace/model/dreambooth_lora/twinkledream_v1"
+
+accelerate launch --num_processes=2 train_scripts/train_dreambooth_lora_sana.py \
+  --pretrained_model_name_or_path=$MODEL_NAME  \
+  --instance_data_dir=$INSTANCE_DATA_DIR \
+  --image_column="image" \
+  --caption_column="prompt" \
+  --output_dir=$OUTPUT_DIR \
+  --mixed_precision="bf16" \
+  --resolution=512 \
+  --train_batch_size=4 \
+  --gradient_accumulation_steps=1 \
+  --learning_rate=1.0 \
+  --lr_scheduler="constant" \
+  --lr_warmup_steps=0 \
+  --max_train_steps=1000 \
+  --seed="0" \
+  --resume_from_checkpoint="latest" \
+  --rank=16 \
+  --optimizer="prodigy" \
