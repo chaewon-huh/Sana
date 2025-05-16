@@ -1,8 +1,8 @@
 export MODEL_NAME="Efficient-Large-Model/Sana_1600M_512px_diffusers"
 export INSTANCE_DATA_DIR="/workspace/data/baseline_dataset_v3_lora"
-export OUTPUT_DIR="/workspace/model/lora/eng_baseline_v3_50k"
+export OUTPUT_DIR="/workspace/model/lora/eng_baseline_v3_full"
 
-accelerate launch --num_processes=2 train_scripts/train_dreambooth_lora_sana.py \
+accelerate launch --num_processes=4 train_scripts/train_dreambooth_lora_sana.py \
   --pretrained_model_name_or_path=$MODEL_NAME  \
   --instance_data_dir=$INSTANCE_DATA_DIR \
   --image_column="image" \
