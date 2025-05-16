@@ -22,9 +22,22 @@ pip install -U pip
 
 # for fast attn
 pip install -U xformers==0.0.27.post2 --index-url https://download.pytorch.org/whl/cu121
+pip install prodigyopt
 
 # install sana
 pip install -e .
 
 # install torchprofile
 # pip install git+https://github.com/zhijian-liu/torchprofile
+
+
+# 4. Hugging Face CLI 로그인
+huggingface-cli login --token "$(grep '^hf_token=' .env | cut -d '=' -f2)" 
+
+# 5. Git 사용자 정보 설정
+git config --global user.name "chaewon.huh"
+git config --global user.email "cw.huh@postech.ac.kr" 
+
+# 6. 추가 패키지 설치 (unzip)
+apt-get update
+apt-get install -y unzip 
