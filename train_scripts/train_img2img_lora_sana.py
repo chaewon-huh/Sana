@@ -32,7 +32,7 @@ import transformers
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedDataParallelKwargs, ProjectConfiguration, set_seed
-from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler, SanaPipeline, SanaTransformer2DModel
+from diffusers import AutoencoderKL, FlowMatchEulerDiscreteScheduler, SanaPipeline, SanaTransformer2DModel, AutoencoderDC
 from diffusers.optimization import get_scheduler
 from diffusers.training_utils import (
     cast_training_params,
@@ -276,7 +276,8 @@ def log_validation(
 
     with torch.no_grad():
         # 1. Encode input image with VAE
-        condition_latents = vae.encode(input_image_tensor).latent_dist.sample() * vae.config.scaling_factor
+        # condition_latents = vae.encode(input_image_tensor).latent_dist.sample() * vae.config.scaling_factor # Old KL Style
+        condition_latents = vae.encode(input_image_tensor).latent * vae.config.scaling_factor # Corrected DC Style
         
         # 2. Project condition latents
         # Ensure projector is in eval mode and on correct device (done above)
@@ -296,11 +297,14 @@ def log_validation(
         
         # 4. Combine pooled embeddings
         # Ensure dtypes match before addition
-        combined_pooled_embeds = text_pooled_embeds.to(image_pooled_embeds.dtype) + image_pooled_embeds
+        if text_pooled_embeds is not None:
+            combined_pooled_embeds = text_pooled_embeds.to(image_pooled_embeds.dtype) + image_pooled_embeds
+        else:
+            # logger.warning("Validation: text_pooled_embeds is None. Using only image_pooled_embeds.")
+            combined_pooled_embeds = image_pooled_embeds
         
         pipeline_args = {
             "prompt_embeds": prompt_embeds_seq,
-            "pooled_prompt_embeds": combined_pooled_embeds,
             "generator": generator,
             # Add other necessary args for SanaPipeline like height, width, num_inference_steps
             "height": args.resolution,
@@ -310,7 +314,16 @@ def log_validation(
 
         for _ in range(args.num_validation_images):
             # The transformer used by the pipeline already has LoRA weights
-            img = pipeline(**pipeline_args).images[0]
+            # If pipeline does not accept pooled_prompt_embeds directly in __call__,
+            # it might need to be passed differently or not at all if text_embeds_seq is sufficient.
+            temp_pipeline_args = pipeline_args.copy()
+            if "pooled_prompt_embeds" in temp_pipeline_args and combined_pooled_embeds is not None:
+                 # Assuming SanaPipeline might take pooled_prompt_embeds. If not, this line (and its presence in pipeline_args) needs removal.
+                 temp_pipeline_args["pooled_prompt_embeds"] = combined_pooled_embeds
+            elif "pooled_prompt_embeds" in temp_pipeline_args: # if key exists but combined_pooled_embeds is None
+                del temp_pipeline_args["pooled_prompt_embeds"]
+
+            img = pipeline(**temp_pipeline_args).images[0]
             images.append(img)
 
     for tracker in accelerator.trackers:
@@ -584,6 +597,10 @@ def parse_args(input_args=None):
     else:
         args = parser.parse_args()
 
+    # If dataset_name is an empty string, treat it as None so image_pairs_dir is used.
+    if args.dataset_name == "":
+        args.dataset_name = None
+
     if args.dataset_name is None and args.image_pairs_dir is None:
         raise ValueError("Specify either `--dataset_name` or `--image_pairs_dir`")
 
@@ -830,7 +847,7 @@ def main(args):
         args.pretrained_model_name_or_path, subfolder="text_encoder", revision=args.revision, variant=args.variant, cache_dir=args.cache_dir,
     )
     
-    vae = AutoencoderKL.from_pretrained(
+    vae = AutoencoderDC.from_pretrained(
         args.pretrained_model_name_or_path,
         subfolder="vae",
         revision=args.revision,
@@ -1082,6 +1099,13 @@ def main(args):
         # `cast_training_params` upcasts trainable params (LoRA in transformer, all in projector) to fp32
         cast_training_params([transformer, image_conditioning_projector], dtype=torch.float32)
 
+    # If using Prodigy and LRs are different, force projector LR to be same as main LR.
+    if args.optimizer.lower() == "prodigy" and args.learning_rate != args.learning_rate_projector:
+        logger.warning(
+            f"Prodigy optimizer does not support different LRs for param groups unless one is 0. "
+            f"Forcing learning_rate_projector ({args.learning_rate_projector}) to be same as learning_rate ({args.learning_rate})."
+        )
+        args.learning_rate_projector = args.learning_rate
 
     transformer_lora_parameters = list(filter(lambda p: p.requires_grad, transformer.parameters()))
     projector_parameters = list(filter(lambda p: p.requires_grad, image_conditioning_projector.parameters()))
@@ -1314,7 +1338,6 @@ def main(args):
                     prompts, text_encoding_pipeline, accelerator.device
                 )
                 text_embeds_seq = text_embeds_seq.to(weight_dtype)
-                text_pooled_embeds = text_pooled_embeds.to(weight_dtype)
                 if text_attention_mask is not None:
                      text_attention_mask = text_attention_mask.to(accelerator.device)
 
@@ -1327,14 +1350,16 @@ def main(args):
                 else:
                     if args.offload: vae.to(accelerator.device, dtype=vae.dtype)
                     target_pixels = batch["target_pixel_values"].to(device=accelerator.device, dtype=vae.dtype)
-                    target_latents = vae.encode(target_pixels).latent_dist.sample() * vae_scale_factor
+                    # target_latents = vae.encode(target_pixels).latent_dist.sample() * vae_scale_factor # Old KL style
+                    target_latents = vae.encode(target_pixels).latent * vae_scale_factor # Corrected DC Style
                     target_latents = target_latents.to(weight_dtype)
                     if args.offload: vae.to("cpu")
                 
                 # Get input image conditioning
                 if args.offload: vae.to(accelerator.device, dtype=vae.dtype)
                 input_pixels = batch["input_pixel_values"].to(device=accelerator.device, dtype=vae.dtype)
-                condition_latents = vae.encode(input_pixels).latent_dist.sample() * vae_scale_factor
+                # condition_latents = vae.encode(input_pixels).latent_dist.sample() * vae_scale_factor # Old KL style
+                condition_latents = vae.encode(input_pixels).latent * vae_scale_factor # Corrected DC Style
                 condition_latents = condition_latents.to(weight_dtype)
                 if args.offload: vae.to("cpu")
 
@@ -1343,8 +1368,13 @@ def main(args):
                 image_pooled_embeds = unwrap_model(image_conditioning_projector)(condition_latents) # (B, pooled_dim)
                 
                 # Combine text and image pooled embeddings
-                # Ensure dtypes match before addition
-                combined_pooled_embeds = text_pooled_embeds.to(image_pooled_embeds.dtype) + image_pooled_embeds
+                if text_pooled_embeds is not None:
+                    # Ensure dtypes match before addition. Cast type only if not None.
+                    typed_text_pooled_embeds = text_pooled_embeds.to(image_pooled_embeds.dtype)
+                    combined_pooled_embeds = typed_text_pooled_embeds + image_pooled_embeds
+                else:
+                    # logger.warning("text_pooled_embeds is None from text_encoding_pipeline. Using only image_pooled_embeds for combined_pooled_embeds.")
+                    combined_pooled_embeds = image_pooled_embeds
 
 
                 # Sample noise and timesteps for target latents
@@ -1370,7 +1400,7 @@ def main(args):
                     timestep=timesteps,
                     encoder_hidden_states=text_embeds_seq,
                     encoder_attention_mask=text_attention_mask,
-                    pooled_prompt_embeds=combined_pooled_embeds, # Pass combined pooled embeds
+                    # pooled_prompt_embeds=combined_pooled_embeds, # Removed as SanaTransformer2DModel may not accept it
                     return_dict=False,
                 )[0]
 
