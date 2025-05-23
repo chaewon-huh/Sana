@@ -23,4 +23,6 @@ TRITON_PRINT_AUTOTUNING=1 \
         --debug=true \
         --report_to=tensorboard \
         --train.visualize=false \
+        --train.save_model_steps=5 \
+        --train.num_epochs=1 \
         "$@" 

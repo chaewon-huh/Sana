@@ -22,6 +22,7 @@ import numpy as np
 from PIL import Image
 from pathlib import Path
 import yaml
+import pyrallis
 
 # Import necessary modules
 from diffusion.model.builder import build_model, get_vae, vae_encode, vae_decode
@@ -41,14 +42,29 @@ class Img2ImgInference:
         
     def _load_config(self, config_path):
         """Load configuration from YAML file"""
-        with open(config_path, 'r') as f:
-            config_dict = yaml.safe_load(f)
+        # Use the dumped config.yaml from training instead of the original config
+        config_yaml_path = "output/img2img_debug/config.yaml"
+        if os.path.exists(config_yaml_path):
+            with open(config_yaml_path, 'r') as f:
+                config_dict = yaml.safe_load(f)
+        else:
+            # Fallback to original config file
+            with open(config_path, 'r') as f:
+                config_dict = yaml.safe_load(f)
+                
+        # Convert dict to SanaConfig using from_dict method
+        from dataclasses import fields
         
-        # Convert dict to SanaConfig object
-        config = SanaConfig()
+        # Create SanaConfig object with the loaded data
+        config_fields = {field.name: field for field in fields(SanaConfig)}
+        config_data = {}
+        
         for key, value in config_dict.items():
-            setattr(config, key, value)
-            
+            if key in config_fields:
+                config_data[key] = value
+                
+        # Create config object
+        config = SanaConfig(**config_data)
         return config
         
     def _setup_model(self, checkpoint_path):
