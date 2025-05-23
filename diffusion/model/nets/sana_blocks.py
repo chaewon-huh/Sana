@@ -676,10 +676,13 @@ class CaptionEmbedder(nn.Module):
         in_channels,
         hidden_size,
         uncond_prob,
-        act_layer=nn.GELU(approximate="tanh"),
+        act_layer=None,
         token_num=120,
     ):
         super().__init__()
+        if act_layer is None:
+            act_layer = lambda: nn.GELU(approximate="tanh")
+        
         self.y_proj = Mlp(
             in_features=in_channels, hidden_features=hidden_size, out_features=hidden_size, act_layer=act_layer, drop=0
         )
@@ -716,6 +719,122 @@ class CaptionEmbedder(nn.Module):
         caption = self.y_proj(caption)
 
         return caption
+
+
+class ImageConditionEmbedder(nn.Module):
+    """
+    Embeds image conditions into vector representations compatible with text embeddings.
+    Converts VAE latents [B, C, H, W] to text-like embeddings [B, seq_len, hidden_size].
+    """
+
+    def __init__(
+        self,
+        in_channels=32,  # VAE latent channels 
+        hidden_size=1152,
+        uncond_prob=0.1,
+        act_layer=None,
+        token_num=120,
+        spatial_compression=8,  # How much to compress spatial dimensions
+    ):
+        super().__init__()
+        
+        if act_layer is None:
+            act_layer = lambda: nn.GELU(approximate="tanh")
+        
+        # Conv layers to process image latents
+        self.spatial_compression = spatial_compression
+        self.conv_proj = nn.Sequential(
+            nn.Conv2d(in_channels, hidden_size // 2, kernel_size=3, padding=1),
+            act_layer(),
+            nn.Conv2d(hidden_size // 2, hidden_size, kernel_size=3, padding=1),
+            act_layer(),
+        )
+        
+        # Adaptive pooling to get fixed sequence length
+        self.adaptive_pool = nn.AdaptiveAvgPool2d((int(token_num**0.5), int(token_num**0.5)))
+        
+        # Final projection to match text embedding space
+        self.proj = Mlp(
+            in_features=hidden_size, 
+            hidden_features=hidden_size, 
+            out_features=hidden_size, 
+            act_layer=act_layer, 
+            drop=0
+        )
+        
+        # Unconditional embedding for classifier-free guidance
+        self.register_buffer("uncond_embedding", nn.Parameter(torch.randn(token_num, hidden_size) / hidden_size**0.5))
+        self.uncond_prob = uncond_prob
+        self.token_num = token_num
+
+    def condition_drop(self, img_condition, force_drop_ids=None):
+        """
+        Drops image conditions to enable classifier-free guidance.
+        """
+        if force_drop_ids is None:
+            drop_ids = torch.rand(img_condition.shape[0]).cuda() < self.uncond_prob
+        else:
+            drop_ids = force_drop_ids == 1
+        
+        # Create uncond embedding batch with the same sequence length as img_condition
+        B, actual_seq_len, hidden_size = img_condition.shape
+        
+        # Generate uncond embedding with the actual sequence length
+        if actual_seq_len != self.token_num:
+            # Create unconditional embedding that matches the actual sequence length
+            uncond_batch = torch.randn(B, actual_seq_len, hidden_size, 
+                                     device=img_condition.device, dtype=img_condition.dtype) / hidden_size**0.5
+        else:
+            uncond_batch = self.uncond_embedding.unsqueeze(0).expand(B, -1, -1)
+        
+        # Replace with unconditional embedding where needed
+        for i, should_drop in enumerate(drop_ids):
+            if should_drop:
+                img_condition[i] = uncond_batch[i]
+        
+        return img_condition
+
+    def forward(self, img_condition, train, force_drop_ids=None, mask=None):
+        """
+        Forward pass for image condition embedding.
+        
+        Args:
+            img_condition: [B, C, H, W] VAE latent or [B, seq_len, dim] text-like embeddings 
+            train: training mode flag
+            force_drop_ids: forced drop ids for CFG
+            mask: attention mask (optional)
+        
+        Returns:
+            [B, seq_len, hidden_size] image embeddings
+        """
+        # Check input shape and handle accordingly
+        if len(img_condition.shape) == 3:
+            # Already processed as text-like embeddings [B, seq_len, dim]
+            x = img_condition
+        elif len(img_condition.shape) == 4:
+            # VAE latent [B, C, H, W] - process through conv layers
+            B, C, H, W = img_condition.shape
+            
+            # Process through conv layers
+            x = self.conv_proj(img_condition)  # [B, hidden_size, H, W]
+            
+            # Adaptive pooling to fixed spatial size
+            x = self.adaptive_pool(x)  # [B, hidden_size, sqrt(token_num), sqrt(token_num)]
+            
+            # Flatten spatial dimensions to create sequence
+            x = x.flatten(2).transpose(1, 2)  # [B, token_num, hidden_size]
+        else:
+            raise ValueError(f"Unexpected input shape: {img_condition.shape}. Expected 3D or 4D tensor.")
+        
+        # Apply CFG dropout if training
+        use_dropout = self.uncond_prob > 0
+        if (train and use_dropout) or (force_drop_ids is not None):
+            x = self.condition_drop(x, force_drop_ids)
+        
+        # Final projection
+        x = self.proj(x)  # [B, token_num, hidden_size]
+        
+        return x
 
 
 class CaptionEmbedderDoubleBr(nn.Module):
